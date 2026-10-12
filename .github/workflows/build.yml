@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh_sources:
-        description: 'Update LEDE, feeds and OpenClash to latest upstream refs'
+        description: 'Resolve latest LEDE/feeds, OpenClash, Mihomo Alpha and stable Zashboard'
         type: boolean
         required: true
         default: true
@@ -37,6 +37,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test source resolution and archive validation
+        run: python3 -m unittest discover -s scripts/tests -v
+
       - name: Prepare disposable runner
         shell: bash
         run: |
@@ -62,11 +65,26 @@ jobs:
           gcc --version | head -n 1
 
       - name: Resolve latest upstream revisions
-        if: github.event_name == 'workflow_dispatch' && inputs.refresh_sources
+        if: github.event_name != 'workflow_dispatch' || inputs.refresh_sources
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/update_sources.py 2>&1 | tee logs/source-update.log
+
+      - name: Show locked component versions
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          lock = json.load(open('sources.lock.json'))
+          print('### Versions selected for this build\n')
+          print('| Component | Version / revision |\n| --- | --- |')
+          for key in ('openclash', 'openclash_core', 'zashboard'):
+              print(f"| {key} | {lock[key]['version']} |")
+          for key, source in [('lede', lock['lede']), *lock['feeds'].items()]:
+              print(f"| {key} | {source['commit']} |")
+          print('\nMihomo follows the existing Alpha channel; Zashboard follows stable releases.')
+          PY
 
       - name: Fetch locked sources and resolve configuration
         shell: bash
@@ -106,7 +124,7 @@ jobs:
           {
             echo '### AX6000 firmware compiled — no flashing performed'
             echo 'Target: mediatek/filogic, xiaomi_redmi-router-ax6000 (NMBM UBI at 0x600000).'
-            echo 'Image, checksums, manifest, resolved config and source lock are in the firmware artifact.'
+            echo 'Image, checksums, software-versions.json, manifest, resolved config and source lock are in the firmware artifact.'
             echo 'Build validation does not prove boot, Wi-Fi, WAN or configuration migration compatibility.'
             echo '```json'
             cat artifacts/firmware/validation.json

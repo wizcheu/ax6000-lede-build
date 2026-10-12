@@ -19,14 +19,30 @@
   "openclash": {
     "url": "https://github.com/vernesong/OpenClash.git",
     "ref": "HEAD",
-    "commit": "c3a33c1d3407956fdf8f0e0b7c1a4c52e6ad9593"
+    "commit": "e553e82e01c697aefbe1555261a503f425e00ccd",
+    "version": "0.48.002"
   },
   "openclash_core": {
     "repository": "https://github.com/vernesong/OpenClash.git",
     "ref": "refs/heads/core",
-    "commit": "66da1f473f4c5c5b747fe44bd15e23dd81c21acf",
+    "commit": "e18b3dfd13ae0eed92c6f0c05b6303923d1e765f",
     "path": "master/meta/clash-linux-arm64.tar.gz",
-    "url": "https://raw.githubusercontent.com/vernesong/OpenClash/66da1f473f4c5c5b747fe44bd15e23dd81c21acf/master/meta/clash-linux-arm64.tar.gz",
-    "sha256": "8252d16726041872825cdd9089c798c318f8862466b40b34d8bf62225ef57e34"
-  }
+    "url": "https://raw.githubusercontent.com/vernesong/OpenClash/e18b3dfd13ae0eed92c6f0c05b6303923d1e765f/master/meta/clash-linux-arm64.tar.gz",
+    "sha256": "aae510c46001b8784b1480be94c3c740db9b387e5419604abaafa4189cd99c6d",
+    "channel": "OpenClash master/meta (Mihomo Alpha)",
+    "version": "alpha-gbc76c13",
+    "checksums_url": "https://raw.githubusercontent.com/vernesong/OpenClash/e18b3dfd13ae0eed92c6f0c05b6303923d1e765f/master/meta/checksums.txt",
+    "binary_sha256": "9cb3180fe12147a5d70b46c40686f692cc8e9a4d88848c8da2dcbaf5908a7eb8"
+  },
+  "zashboard": {
+    "repository": "https://github.com/Zephyruso/zashboard",
+    "channel": "latest stable release",
+    "tag": "v3.29.1",
+    "version": "3.29.1",
+    "asset": "dist-cdn-fonts.zip",
+    "url": "https://github.com/Zephyruso/zashboard/releases/download/v3.29.1/dist-cdn-fonts.zip",
+    "sha256": "7c9edba8e7de4303b962ec682c3d16cf119bb775ce4683bcfb49822890a4edc3"
+  },
+  "schema_version": 2,
+  "resolved_at": "2026-10-12T06:28:43+00:00"
 }

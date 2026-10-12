@@ -8,6 +8,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
+
+from source_utils import write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDE = ROOT / "work/lede"
@@ -36,6 +39,34 @@ def validate_config():
     print("Kconfig requirements, single device and NMBM partition layout verified")
 
 
+def verify_bundled(image, packages):
+    expected_path = LEDE / "files/etc/ax6000-build.json"
+    bundled = json.loads(expected_path.read_text())
+    version = bundled["openclash"]["version"]
+    installed = packages["luci-app-openclash"]
+    if installed != version and not installed.startswith(version + "-"):
+        raise SystemExit(f"Unexpected compiled OpenClash version: {installed}")
+    hashes = {"etc/openclash/core/clash_meta": bundled["mihomo"]["sha256"],
+              "etc/ax6000-build.json": hashlib.sha256(expected_path.read_bytes()).hexdigest()}
+    hashes.update({"usr/share/openclash/ui/zashboard/" + name: digest
+                   for name, digest in bundled["zashboard"]["files"].items()})
+    with tempfile.TemporaryDirectory() as temp:
+        rootfs = Path(temp) / "root.squashfs"
+        with tarfile.open(image, "r:") as tar:
+            roots = [m for m in tar.getmembers() if m.name.endswith("/root") and m.isfile()]
+            if len(roots) != 1:
+                raise SystemExit("Expected exactly one root filesystem")
+            with tar.extractfile(roots[0]) as src, rootfs.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+        unsquashfs = LEDE / "staging_dir/host/bin/unsquashfs4"
+        for name, digest in hashes.items():
+            data = subprocess.check_output([str(unsquashfs), "-cat", str(rootfs), name])
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise SystemExit(f"Bundled file differs inside firmware: {name}")
+    print(f"Verified {len(hashes)} bundled files inside the actual squashfs image")
+    return bundled
+
+
 def validate_image():
     validate_config()
     out = LEDE / "bin/targets/mediatek/filogic"
@@ -61,10 +92,12 @@ def validate_image():
     manifest_files = list(out.glob("*.manifest"))
     if len(manifest_files) != 1:
         raise SystemExit("Expected one package manifest")
-    packages = {line.split(" - ", 1)[0] for line in manifest_files[0].read_text().splitlines()}
+    packages = dict(line.split(" - ", 1) for line in manifest_files[0].read_text().splitlines())
     required = {"luci-app-openclash", "ruby-yaml", "firewall4", "kmod-mt7915e", "dnsmasq-full"}
-    if not required <= packages:
-        raise SystemExit(f"Packages missing from image: {required - packages}")
+    if not required <= packages.keys():
+        raise SystemExit(f"Packages missing from image: {required - packages.keys()}")
+    bundled = verify_bundled(image, packages)
+    write_json(dest / "software-versions.json", {"bundled": bundled, "packages": dict(sorted(packages.items()))})
     for path in [image, *manifest_files, out / "profiles.json"]:
         if path.is_file():
             shutil.copy2(path, dest / path.name)
@@ -76,6 +109,9 @@ def validate_image():
     (dest / "SHA256SUMS").write_text(f"{sha}  {image.name}\n")
     result = {"image": image.name, "size_bytes": size, "sha256": sha,
               "supported_devices": meta["supported_devices"], "package_count": len(packages),
+              "bundled_versions": {name: bundled[name]["version"]
+                                   for name in ("openclash", "mihomo", "zashboard")},
+              "bundled_files_verified_in_image": True,
               "runtime_tested": False, "flashed": False}
     (dest / "validation.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

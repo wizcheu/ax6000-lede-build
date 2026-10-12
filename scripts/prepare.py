@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fetch exact source revisions and assemble an isolated LEDE build tree."""
-import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
-import tarfile
+
+from source_utils import (extract_core, extract_dashboard, locked_download,
+                          package_version, write_json)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work"
@@ -33,7 +33,36 @@ def checkout(source, dest):
         raise SystemExit(f"Source revision mismatch: {dest}")
 
 
+def install_bundled(lock, lede, cache):
+    package = lede / "package/custom/luci-app-openclash"
+    actual_version = package_version((package / "Makefile").read_text())
+    if actual_version != lock["openclash"]["version"]:
+        raise ValueError("OpenClash source version does not match lock")
+    core = lock["openclash_core"]
+    core_sha = extract_core(locked_download(core, cache, ".tar.gz"),
+                            lede / "files/etc/openclash/core/clash_meta")
+    if core_sha != core["binary_sha256"]:
+        raise ValueError("Extracted Mihomo binary does not match lock")
+    dashboard = lock["zashboard"]
+    ui = package / "root/usr/share/openclash/ui/zashboard"
+    # Replace the package's bundled panel so the IPK and firmware both contain it.
+    if ui.exists():
+        shutil.rmtree(ui)
+    dashboard_hashes = extract_dashboard(locked_download(dashboard, cache, ".zip"), ui)
+    bundled = {
+        "resolved_at": lock["resolved_at"],
+        "openclash": {"version": actual_version, "commit": lock["openclash"]["commit"]},
+        "mihomo": {"version": core["version"], "channel": core["channel"], "sha256": core_sha},
+        "zashboard": {"version": dashboard["version"], "tag": dashboard["tag"],
+                      "archive_sha256": dashboard["sha256"], "files": dashboard_hashes},
+    }
+    write_json(lede / "files/etc/ax6000-build.json", bundled)
+    return bundled
+
+
 def main():
+    if LOCK.get("schema_version") != 2:
+        raise SystemExit("Run update_sources.py to migrate this old lock before preparing sources")
     WORK.mkdir(exist_ok=True)
     checkout(LOCK["lede"], LEDE)
     feeds = []
@@ -45,27 +74,9 @@ def main():
     checkout(LOCK["openclash"], WORK / "openclash")
     shutil.copytree(WORK / "openclash/luci-app-openclash", LEDE / "package/custom/luci-app-openclash")
 
-    core = LOCK["openclash_core"]
-    archive = WORK / "clash-linux-arm64.tar.gz"
-    run("curl", "--fail", "--location", "--retry", "5", "--connect-timeout", "30",
-        "--speed-limit", "1024", "--speed-time", "60", "--max-time", "600",
-        "--retry-max-time", "180", "--silent", "--show-error",
-        "--output", str(archive), core["url"])
-    if hashlib.sha256(archive.read_bytes()).hexdigest() != core["sha256"]:
-        raise SystemExit("OpenClash core SHA256 mismatch")
-    core_dest = LEDE / "files/etc/openclash/core/clash_meta"
-    core_dest.parent.mkdir(parents=True)
-    with tarfile.open(archive, "r:gz") as tar:
-        member = tar.getmember("clash")
-        if not member.isfile() or member.size > 100 * 1024 * 1024:
-            raise SystemExit("Unexpected core archive contents")
-        with tar.extractfile(member) as src, core_dest.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
-    # ELF64, little endian, AArch64 (e_machine=183).
-    elf = core_dest.read_bytes()[:20]
-    if elf[:6] != b"\x7fELF\x02\x01" or int.from_bytes(elf[18:20], "little") != 183:
-        raise SystemExit("Core is not an AArch64 ELF executable")
-    core_dest.chmod(0o755)
+    bundled = install_bundled(LOCK, LEDE, ROOT / "downloads")
+    print("Bundled versions:", {name: bundled[name]["version"]
+                               for name in ("openclash", "mihomo", "zashboard")})
 
     defaults = LEDE / "files/etc/uci-defaults/99-ax6000-build"
     defaults.parent.mkdir(parents=True)
