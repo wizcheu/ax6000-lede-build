@@ -96,7 +96,7 @@ def main():
                                for name in ("openclash", "mihomo", "zashboard", "tailcat")})
 
     defaults = LEDE / "files/etc/uci-defaults/99-ax6000-build"
-    defaults.parent.mkdir(parents=True)
+    defaults.parent.mkdir(parents=True, exist_ok=True)
     defaults.write_text("""#!/bin/sh
 uci -q set system.@system[0].timezone='CST-8'
 uci -q set system.@system[0].zonename='Asia/Shanghai'

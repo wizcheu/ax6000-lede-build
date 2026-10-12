@@ -2,6 +2,7 @@
 import io
 import json
 from pathlib import Path
+import shutil
 import stat
 import sys
 import tarfile
@@ -12,6 +13,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import source_utils as utils
+import prepare
 import update_sources
 
 
@@ -159,6 +161,46 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 update_sources.main()
         self.assertEqual(path.read_bytes(), before)
+
+    def test_prepare_keeps_tailcat_and_system_defaults_in_shared_directory(self):
+        lock = json.loads(json.dumps(prepare.LOCK))
+        core, dashboard, tailcat = self.core(), self.dashboard(), self.tailcat()
+        lock["openclash_core"]["binary_sha256"] = utils.extract_core(core, self.root / "core.bin")
+        lock["tailcat"]["binary_sha256"] = utils.extract_tailcat(tailcat, self.root / "tailcat.bin")
+        cache = self.root / "downloads"
+        cache.mkdir()
+        for component, archive, suffix in (("openclash_core", core, ".tar.gz"),
+                                            ("zashboard", dashboard, ".zip"),
+                                            ("tailcat", tailcat, ".tar.gz")):
+            digest = lock[component]["sha256"] = utils.sha256(archive)
+            shutil.copyfile(archive, cache / (digest + suffix))
+        shutil.copytree(prepare.ROOT / "files", self.root / "files")
+        shutil.copytree(prepare.ROOT / "configs", self.root / "configs")
+        work = self.root / "work"
+        lede = work / "lede"
+
+        def checkout(source, dest):
+            dest.mkdir(parents=True)
+            if dest == work / "openclash":
+                package = dest / "luci-app-openclash"
+                package.mkdir()
+                (package / "Makefile").write_text(f"PKG_VERSION:={lock['openclash']['version']}\n")
+
+        # Keep file assembly real; stub only source checkout and external build commands.
+        with patch.multiple(prepare, ROOT=self.root, WORK=work, LEDE=lede, LOCK=lock), \
+                patch.object(prepare, "checkout", side_effect=checkout), \
+                patch.object(prepare, "run") as run, patch("sys.stdout", new=io.StringIO()):
+            prepare.main()
+        defaults = lede / "files/etc/uci-defaults"
+        migration = "98-tailcat-bundle"
+        self.assertEqual((defaults / migration).read_bytes(),
+                         (self.root / "files/etc/uci-defaults" / migration).read_bytes())
+        system_defaults = defaults / "99-ax6000-build"
+        self.assertIn("uci -q set openclash.config.enable='0'", system_defaults.read_text())
+        self.assertEqual(system_defaults.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((lede / ".config").read_bytes(),
+                         (self.root / "configs/ax6000.config").read_bytes())
+        run.assert_called_with("python3", str(self.root / "scripts/validate.py"), "config", cwd=lede)
 
 
 if __name__ == "__main__":
