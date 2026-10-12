@@ -31,6 +31,8 @@ def main():
     with tempfile.TemporaryDirectory() as temp:
         archive = Path(temp) / "core.tar.gz"
         subprocess.run(["curl", "--fail", "--location", "--retry", "5", "--connect-timeout", "30",
+                        "--speed-limit", "1024", "--speed-time", "60", "--max-time", "600",
+                        "--retry-max-time", "180", "--silent", "--show-error",
                         "--output", str(archive), core["url"]], check=True)
         core["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
     # Write only after every ref and core download succeeded.

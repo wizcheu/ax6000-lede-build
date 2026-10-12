@@ -48,6 +48,8 @@ def main():
     core = LOCK["openclash_core"]
     archive = WORK / "clash-linux-arm64.tar.gz"
     run("curl", "--fail", "--location", "--retry", "5", "--connect-timeout", "30",
+        "--speed-limit", "1024", "--speed-time", "60", "--max-time", "600",
+        "--retry-max-time", "180", "--silent", "--show-error",
         "--output", str(archive), core["url"])
     if hashlib.sha256(archive.read_bytes()).hexdigest() != core["sha256"]:
         raise SystemExit("OpenClash core SHA256 mismatch")
