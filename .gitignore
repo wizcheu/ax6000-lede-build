@@ -1,0 +1,12 @@
+/work/
+/artifacts/
+/logs/
+/downloads/
+__pycache__/
+*.pyc
+# Never commit device backups, keys, subscription files or private inventories.
+/inventory/
+/private/
+*.backup
+*.key
+*.pem
