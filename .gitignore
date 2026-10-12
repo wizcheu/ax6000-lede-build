@@ -10,3 +10,5 @@ __pycache__/
 *.backup
 *.key
 *.pem
+*.private.json
+/files/etc/tailcat/

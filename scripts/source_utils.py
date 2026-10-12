@@ -88,6 +88,39 @@ def extract_core(archive, dest):
     return sha256(dest)
 
 
+def extract_tailcat(archive, dest, license_dest=None):
+    """Accept the official three-file archive and a static AArch64 executable."""
+    dest = Path(dest)
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        if (len(members) != 3 or {m.name for m in members} != {"tailcat", "LICENSE", "README.md"} or
+                any(not m.isfile() or not 0 < m.size <= (100 if m.name == "tailcat" else 2) * 1024**2
+                    for m in members)):
+            raise ValueError("Unexpected Tailcat archive contents")
+        binary = tar.extractfile("tailcat").read()
+        if (len(binary) < 64 or binary[:6] != b"\x7fELF\x02\x01" or
+                int.from_bytes(binary[18:20], "little") != 183):
+            raise ValueError("Tailcat is not an AArch64 ELF executable")
+        phoff = int.from_bytes(binary[32:40], "little")
+        phsize = int.from_bytes(binary[54:56], "little")
+        phnum = int.from_bytes(binary[56:58], "little")
+        if not (phoff >= 64 and phsize == 56 and 0 < phnum < 128 and
+                phoff + phsize * phnum <= len(binary)):
+            raise ValueError("Invalid Tailcat ELF program headers")
+        if any(int.from_bytes(binary[p:p + 4], "little") in (2, 3)
+               for p in range(phoff, phoff + phsize * phnum, phsize)):
+            raise ValueError("Tailcat must be statically linked")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(binary)
+        dest.chmod(0o755)
+        if license_dest is not None:
+            license_dest = Path(license_dest)
+            license_dest.parent.mkdir(parents=True, exist_ok=True)
+            license_dest.write_bytes(tar.extractfile("LICENSE").read())
+            license_dest.chmod(0o644)
+    return sha256(dest)
+
+
 def extract_dashboard(archive, dest):
     """Accept only bounded regular files under dist/, never ZIP paths or links."""
     dest = Path(dest)

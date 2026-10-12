@@ -1,0 +1,35 @@
+#!/bin/sh
+# Migrate only the known manual installation; never replace a custom service.
+set -eu
+legacy_init=f7981325012f6e1df0f4b15defcf8bdb153030297c4cf352dbbc43ade35208dc
+legacy_binary=1f8e877f9080ab0436eaf2bb0d0712f190f56d30d3e78ece8d0680b280f1f955
+
+matches() {
+    [ -f "$1" ] && [ "$(sha256sum "$1" | cut -d ' ' -f 1)" = "$2" ]
+}
+
+if [ -f /rom/usr/bin/tailcat ] && [ -f /rom/etc/init.d/tailcat ] &&
+   matches /etc/init.d/tailcat "$legacy_init" && matches /usr/bin/tailcat "$legacy_binary"; then
+    # An old sysupgrade.conf may restore these over newer firmware files.
+    # Copy verified firmware content only during this recognized one-time migration.
+    if ! cmp -s /usr/bin/tailcat /rom/usr/bin/tailcat; then
+        cp /rom/usr/bin/tailcat /usr/bin/tailcat.new
+        chmod 755 /usr/bin/tailcat.new
+        mv /usr/bin/tailcat.new /usr/bin/tailcat
+    fi
+    cp /rom/etc/init.d/tailcat /etc/init.d/tailcat.new
+    chmod 755 /etc/init.d/tailcat.new
+    mv /etc/init.d/tailcat.new /etc/init.d/tailcat
+    # Identity and autostart links remain covered by keep.d/tailcat.
+    if [ -f /etc/sysupgrade.conf ]; then
+        sed '\|^/usr/bin/tailcat$|d; \|^/etc/init.d/tailcat$|d' /etc/sysupgrade.conf > /etc/sysupgrade.conf.tailcat-new
+        mv /etc/sysupgrade.conf.tailcat-new /etc/sysupgrade.conf
+    fi
+fi
+
+# New installations require explicit setup; never ship or generate a shared key.
+# A retained installation keeps its existing enabled/disabled state.
+if [ ! -s /etc/tailcat/router.private.json ]; then
+    /etc/init.d/tailcat disable
+fi
+exit 0

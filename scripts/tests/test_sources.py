@@ -42,6 +42,36 @@ class SourceTests(unittest.TestCase):
                 zipped.writestr(extra, "bad")
         return path
 
+    def tailcat(self, machine=183, program_type=1, name="tailcat", link=False):
+        path = self.root / "tailcat.tar.gz"
+        elf = bytearray(120)
+        elf[:6] = b"\x7fELF\x02\x01"
+        elf[18:20] = machine.to_bytes(2, "little")
+        elf[32:40] = (64).to_bytes(8, "little")
+        elf[54:56] = (56).to_bytes(2, "little")
+        elf[56:58] = (1).to_bytes(2, "little")
+        elf[64:68] = program_type.to_bytes(4, "little")
+        with tarfile.open(path, "w:gz") as tar:
+            for filename, content in ((name, elf), ("LICENSE", b"license"), ("README.md", b"readme")):
+                member = tarfile.TarInfo(filename)
+                member.size = len(content)
+                if link and filename == name:
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = "/bin/sh"
+                tar.addfile(member, io.BytesIO(content))
+        return path
+
+    def test_tailcat_rejects_wrong_arch_dynamic_and_unsafe_archives(self):
+        for args in ({"machine": 62}, {"program_type": 2}, {"program_type": 3},
+                     {"name": "../tailcat"}, {"name": "LICENSE"}, {"link": True}):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                utils.extract_tailcat(self.tailcat(**args), self.root / "bin/tailcat")
+        self.assertFalse((self.root / "bin/tailcat").exists())
+        digest = utils.extract_tailcat(self.tailcat(), self.root / "bin/tailcat", self.root / "LICENSE")
+        self.assertEqual(digest, utils.sha256(self.root / "bin/tailcat"))
+        self.assertEqual((self.root / "LICENSE").read_bytes(), b"license")
+        self.assertEqual((self.root / "bin/tailcat").stat().st_mode & 0o777, 0o755)
+
     def test_bad_download_preserves_previous_file(self):
         dest = self.root / "download"
         dest.write_bytes(b"previous")
@@ -75,7 +105,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(set(hashes), {"index.html", "assets/main.js"})
 
     def test_release_and_core_snapshot_is_consistent(self):
-        core, dashboard = self.core(), self.dashboard()
+        core, dashboard, tailcat = self.core(), self.dashboard(), self.tailcat()
         original = {
             "lede": {"url": "https://example.com/lede.git", "ref": "HEAD"},
             "feeds": {}, "openclash": {"url": "https://example.com/openclash.git", "ref": "HEAD"},
@@ -85,6 +115,10 @@ class SourceTests(unittest.TestCase):
             "name": "dist-cdn-fonts.zip", "digest": "sha256:" + utils.sha256(dashboard),
             "browser_download_url": "https://github.com/Zephyruso/zashboard/releases/download/v1.2.3/dist-cdn-fonts.zip",
         }]}
+        tailcat_release = {"tag_name": "v0.7.0", "draft": False, "prerelease": False, "assets": [{
+            "name": "tailcat_0.7.0_linux_arm64.tar.gz", "digest": "sha256:" + utils.sha256(tailcat),
+            "browser_download_url": "https://github.com/tailscale/tailcat/releases/download/v0.7.0/tailcat_0.7.0_linux_arm64.tar.gz",
+        }]}
         def text(url):
             if url.endswith("Makefile"):
                 return "PKG_VERSION:=0.48.002\n"
@@ -92,10 +126,10 @@ class SourceTests(unittest.TestCase):
                 return "alpha-g1234567\nalpha-smart-g7654321\n"
             if url.endswith("checksums.txt"):
                 return utils.sha256(core) + "  ./clash-linux-arm64.tar.gz\n"
-            return json.dumps(release)
+            return json.dumps(tailcat_release if "tailscale/tailcat" in url else release)
         # Exercise real hash verification and archive validation with controlled upstream inputs.
         def download(url, dest, expected=None):
-            src = core if url.endswith(".tar.gz") else dashboard
+            src = tailcat if "tailscale/tailcat" in url else core if url.endswith(".tar.gz") else dashboard
             if utils.sha256(src) != expected:
                 raise ValueError("SHA256 mismatch")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -106,11 +140,15 @@ class SourceTests(unittest.TestCase):
             result = update_sources.resolve(original, self.root / "cache")
             self.assertEqual(result["openclash_core"]["version"], "alpha-g1234567")
             self.assertEqual(result["zashboard"]["version"], "1.2.3")
-            self.assertEqual(result["schema_version"], 2)
+            self.assertEqual(result["tailcat"]["version"], "0.7.0")
+            self.assertEqual(result["schema_version"], 3)
             self.assertNotIn("commit", original["lede"])
-            release["assets"][0]["digest"] = None
-            with self.assertRaisesRegex(ValueError, "SHA256 digest unavailable"):
-                update_sources.resolve(original, self.root / "cache")
+            for upstream in (release, tailcat_release):
+                digest = upstream["assets"][0]["digest"]
+                upstream["assets"][0]["digest"] = None
+                with self.assertRaisesRegex(ValueError, "SHA256 digest unavailable"):
+                    update_sources.resolve(original, self.root / "cache")
+                upstream["assets"][0]["digest"] = digest
 
     def test_failed_refresh_keeps_lock_byte_identical(self):
         path = self.root / "sources.lock.json"

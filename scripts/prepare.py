@@ -5,8 +5,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from source_utils import (extract_core, extract_dashboard, locked_download,
-                          package_version, write_json)
+from source_utils import (extract_core, extract_dashboard, extract_tailcat, locked_download,
+                          package_version, sha256, write_json)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work"
@@ -49,19 +49,36 @@ def install_bundled(lock, lede, cache):
     if ui.exists():
         shutil.rmtree(ui)
     dashboard_hashes = extract_dashboard(locked_download(dashboard, cache, ".zip"), ui)
+    tailcat = lock["tailcat"]
+    tailcat_sha = extract_tailcat(locked_download(tailcat, cache, ".tar.gz"),
+                                  lede / "files/usr/bin/tailcat",
+                                  lede / "files/usr/share/licenses/tailcat/LICENSE")
+    if tailcat_sha != tailcat["binary_sha256"]:
+        raise ValueError("Extracted Tailcat binary does not match lock")
+    # Copy only explicit public templates, never a device identity or backup.
+    tailcat_files = ["etc/init.d/tailcat", "etc/uci-defaults/98-tailcat-bundle",
+                     "lib/upgrade/keep.d/tailcat"]
+    for name in tailcat_files:
+        dest = lede / "files" / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "files" / name, dest)
+    tailcat_files += ["usr/bin/tailcat", "usr/share/licenses/tailcat/LICENSE"]
     bundled = {
         "resolved_at": lock["resolved_at"],
         "openclash": {"version": actual_version, "commit": lock["openclash"]["commit"]},
         "mihomo": {"version": core["version"], "channel": core["channel"], "sha256": core_sha},
         "zashboard": {"version": dashboard["version"], "tag": dashboard["tag"],
                       "archive_sha256": dashboard["sha256"], "files": dashboard_hashes},
+        "tailcat": {"version": tailcat["version"], "tag": tailcat["tag"],
+                    "archive_sha256": tailcat["sha256"], "sha256": tailcat_sha,
+                    "files": {name: sha256(lede / "files" / name) for name in tailcat_files}},
     }
     write_json(lede / "files/etc/ax6000-build.json", bundled)
     return bundled
 
 
 def main():
-    if LOCK.get("schema_version") != 2:
+    if LOCK.get("schema_version") != 3:
         raise SystemExit("Run update_sources.py to migrate this old lock before preparing sources")
     WORK.mkdir(exist_ok=True)
     checkout(LOCK["lede"], LEDE)
@@ -76,7 +93,7 @@ def main():
 
     bundled = install_bundled(LOCK, LEDE, ROOT / "downloads")
     print("Bundled versions:", {name: bundled[name]["version"]
-                               for name in ("openclash", "mihomo", "zashboard")})
+                               for name in ("openclash", "mihomo", "zashboard", "tailcat")})
 
     defaults = LEDE / "files/etc/uci-defaults/99-ax6000-build"
     defaults.parent.mkdir(parents=True)

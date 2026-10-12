@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh_sources:
-        description: 'Resolve latest LEDE/feeds, OpenClash, Mihomo Alpha and stable Zashboard'
+        description: 'Resolve latest LEDE/feeds, OpenClash, Mihomo Alpha, stable Zashboard and Tailcat'
         type: boolean
         required: true
         default: true
@@ -13,6 +13,7 @@ on:
     paths:
       - '.github/workflows/build.yml'
       - 'configs/**'
+      - 'files/**'
       - 'scripts/**'
       - 'sources.lock.json'
 
@@ -79,11 +80,11 @@ jobs:
           lock = json.load(open('sources.lock.json'))
           print('### Versions selected for this build\n')
           print('| Component | Version / revision |\n| --- | --- |')
-          for key in ('openclash', 'openclash_core', 'zashboard'):
+          for key in ('openclash', 'openclash_core', 'zashboard', 'tailcat'):
               print(f"| {key} | {lock[key]['version']} |")
           for key, source in [('lede', lock['lede']), *lock['feeds'].items()]:
               print(f"| {key} | {source['commit']} |")
-          print('\nMihomo follows the existing Alpha channel; Zashboard follows stable releases.')
+          print('\nMihomo follows the existing Alpha channel; Zashboard and Tailcat follow stable releases.')
           PY
 
       - name: Fetch locked sources and resolve configuration

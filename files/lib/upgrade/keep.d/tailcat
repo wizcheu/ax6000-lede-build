@@ -1,0 +1,3 @@
+/etc/tailcat/
+/etc/rc.d/S95tailcat
+/etc/rc.d/K10tailcat

@@ -50,6 +50,7 @@ def verify_bundled(image, packages):
               "etc/ax6000-build.json": hashlib.sha256(expected_path.read_bytes()).hexdigest()}
     hashes.update({"usr/share/openclash/ui/zashboard/" + name: digest
                    for name, digest in bundled["zashboard"]["files"].items()})
+    hashes.update(bundled["tailcat"]["files"])
     with tempfile.TemporaryDirectory() as temp:
         rootfs = Path(temp) / "root.squashfs"
         with tarfile.open(image, "r:") as tar:
@@ -59,6 +60,11 @@ def verify_bundled(image, packages):
             with tar.extractfile(roots[0]) as src, rootfs.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
         unsquashfs = LEDE / "staging_dir/host/bin/unsquashfs4"
+        listing = subprocess.check_output([str(unsquashfs), "-ls", str(rootfs)], text=True)
+        forbidden = ("etc/tailcat", "etc/rc.d/S95tailcat", "etc/rc.d/K10tailcat")
+        if any(line.startswith("squashfs-root/" + name) for line in listing.splitlines()
+               for name in forbidden):
+            raise SystemExit("Generic firmware must contain no Tailcat identity or autostart links")
         for name, digest in hashes.items():
             data = subprocess.check_output([str(unsquashfs), "-cat", str(rootfs), name])
             if hashlib.sha256(data).hexdigest() != digest:
@@ -110,7 +116,7 @@ def validate_image():
     result = {"image": image.name, "size_bytes": size, "sha256": sha,
               "supported_devices": meta["supported_devices"], "package_count": len(packages),
               "bundled_versions": {name: bundled[name]["version"]
-                                   for name in ("openclash", "mihomo", "zashboard")},
+                                   for name in ("openclash", "mihomo", "zashboard", "tailcat")},
               "bundled_files_verified_in_image": True,
               "runtime_tested": False, "flashed": False}
     (dest / "validation.json").write_text(json.dumps(result, indent=2) + "\n")
