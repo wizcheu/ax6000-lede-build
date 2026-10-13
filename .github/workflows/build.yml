@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh_sources:
-        description: 'Resolve latest LEDE/feeds, OpenClash, Mihomo Alpha, stable Zashboard and Tailcat'
+        description: 'Refresh other upstreams; Aeris always uses its latest stable release'
         type: boolean
         required: true
         default: true
@@ -67,25 +67,12 @@ jobs:
 
       - name: Resolve latest upstream revisions
         if: github.event_name != 'workflow_dispatch' || inputs.refresh_sources
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/update_sources.py 2>&1 | tee logs/source-update.log
-
-      - name: Show locked component versions
-        shell: bash
-        run: |
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json
-          lock = json.load(open('sources.lock.json'))
-          print('### Versions selected for this build\n')
-          print('| Component | Version / revision |\n| --- | --- |')
-          for key in ('openclash', 'openclash_core', 'zashboard', 'tailcat'):
-              print(f"| {key} | {lock[key]['version']} |")
-          for key, source in [('lede', lock['lede']), *lock['feeds'].items()]:
-              print(f"| {key} | {source['commit']} |")
-          print('\nMihomo follows the existing Alpha channel; Zashboard and Tailcat follow stable releases.')
-          PY
 
       - name: Fetch locked sources and resolve configuration
         shell: bash
@@ -94,8 +81,25 @@ jobs:
           python3 scripts/prepare.py 2>&1 | tee logs/prepare.log
 
       - name: Download, compile and validate firmware
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: bash scripts/build.sh
+
+      - name: Show final component versions
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          lock = json.load(open('sources.lock.json'))
+          print('### Versions selected for this build\n')
+          print('| Component | Version / revision |\n| --- | --- |')
+          for key in ('aeris', 'openclash', 'openclash_core', 'zashboard', 'tailcat'):
+              print(f"| {key} | {lock[key]['version']} |")
+          for key, source in [('lede', lock['lede']), *lock['feeds'].items()]:
+              print(f"| {key} | {source['commit']} |")
+          print('\nMihomo follows the existing Alpha channel; Aeris, Zashboard and Tailcat follow stable releases.')
+          PY
 
       - name: Publish firmware artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

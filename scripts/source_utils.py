@@ -1,6 +1,7 @@
 """Verified downloads and bounded extraction of firmware build inputs."""
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
+from urllib.parse import urlsplit
 
 
 def sha256(path):
@@ -26,11 +28,21 @@ def fetch(url, dest, expected=None):
         raise ValueError("Invalid SHA256")
     with tempfile.TemporaryDirectory(dir=dest.parent) as temp:
         candidate = Path(temp) / "download"
+        auth = []
+        token = os.environ.get("GITHUB_TOKEN")
+        if urlsplit(url).hostname == "api.github.com" and token:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+", token):
+                raise ValueError("Invalid GitHub API token format")
+            # Keep the token out of process arguments and exception messages.
+            config = Path(temp) / "github-auth.conf"
+            config.write_text(f'header = "Authorization: Bearer {token}"\n')
+            config.chmod(0o600)
+            auth = ["--config", str(config)]
         subprocess.run([
             "curl", "--fail", "--location", "--proto", "=https", "--proto-redir", "=https",
             "--retry", "5", "--connect-timeout", "30", "--speed-limit", "1024",
             "--speed-time", "60", "--max-time", "600", "--retry-max-time", "180",
-            "--silent", "--show-error", "--output", str(candidate), url,
+            "--silent", "--show-error", *auth, "--output", str(candidate), url,
         ], check=True)
         if expected is not None and sha256(candidate) != expected:
             raise ValueError(f"SHA256 mismatch: {url}")
@@ -66,8 +78,56 @@ def write_json(path, value):
 def package_version(makefile):
     match = re.search(r"^PKG_VERSION\s*:?=\s*([\w.+-]+)\s*$", makefile, re.M)
     if not match:
-        raise ValueError("Cannot resolve literal OpenClash PKG_VERSION")
+        raise ValueError("Cannot resolve literal package PKG_VERSION")
     return match[1]
+
+
+def extract_aeris(archive, dest, version):
+    """Validate the release source archive before copying its package inputs."""
+    dest = Path(dest)
+    prefix = "luci-theme-aeris"
+    with tarfile.open(archive, "r:gz") as tar:
+        members = tar.getmembers()
+        if len(members) > 2000 or sum(m.size for m in members) > 25 * 1024**2:
+            raise ValueError("Aeris source archive is unexpectedly large")
+        seen = set()
+        files = {}
+        for member in members:
+            parts = member.name.rstrip("/").split("/")
+            if (parts[0] != prefix or any(p in ("", ".", "..") for p in parts) or
+                    "\\" in member.name or member.name in seen or
+                    not (member.isfile() or member.isdir())):
+                raise ValueError(f"Unsafe Aeris archive entry: {member.name}")
+            seen.add(member.name)
+            if member.isfile():
+                files["/".join(parts[1:])] = member
+        required = {"Makefile", "LICENSE", "NOTICE", "htdocs/luci-static/aeris/aeris.css",
+                    "ucode/template/themes/aeris/header.ut", "ucode/template/themes/aeris/footer.ut",
+                    "ucode/template/themes/aeris/sysauth.ut",
+                    "root/etc/uci-defaults/30_luci-theme-aeris"}
+        if not required <= files.keys():
+            raise ValueError(f"Aeris package inputs missing: {required - files.keys()}")
+        makefile = tar.extractfile(files["Makefile"]).read().decode()
+        if (package_version(makefile) != version or
+                not re.search(r"^PKG_NAME:=luci-theme-aeris$", makefile, re.M)):
+            raise ValueError("Aeris source version/name does not match release")
+        # Preview pages, tests and repository metadata are not build inputs.
+        for name, member in files.items():
+            if name not in {"Makefile", "LICENSE", "NOTICE"} and not name.startswith(("htdocs/", "ucode/", "root/")):
+                continue
+            target = dest / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(tar.extractfile(member).read())
+            target.chmod(0o755 if member.mode & 0o111 else 0o644)
+    # LuCI adds version queries to templates; verify the untransformed runtime
+    # assets and registration script against source hashes in the final image.
+    hashes = {}
+    for source, target in (("htdocs", "www"), ("root", "")):
+        for path in sorted((dest / source).rglob("*")):
+            if path.is_file():
+                name = "/".join(filter(None, (target, path.relative_to(dest / source).as_posix())))
+                hashes[name] = sha256(path)
+    return hashes
 
 
 def extract_core(archive, dest):

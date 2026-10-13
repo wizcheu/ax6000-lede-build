@@ -1,9 +1,11 @@
 """Regression checks for failed updates, untrusted archives and packaged assets."""
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -15,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import source_utils as utils
 import prepare
 import update_sources
+import validate
 
 
 class SourceTests(unittest.TestCase):
@@ -42,6 +45,29 @@ class SourceTests(unittest.TestCase):
                 zipped.writestr("dist/assets/main.js", "version='1.2.3'")
             if extra is not None:
                 zipped.writestr(extra, "bad")
+        return path
+
+    def aeris(self, version="1.0.2", extra=None):
+        path = self.root / f"aeris-{version}.tar.gz"
+        files = {
+            "Makefile": f"PKG_NAME:=luci-theme-aeris\nPKG_VERSION:={version}\n",
+            "LICENSE": "license", "NOTICE": "notice",
+            "htdocs/luci-static/aeris/aeris.css": ":root{color:blue}",
+            "ucode/template/themes/aeris/header.ut": "header",
+            "ucode/template/themes/aeris/footer.ut": version,
+            "ucode/template/themes/aeris/sysauth.ut": "login",
+            "root/etc/uci-defaults/30_luci-theme-aeris": "#!/bin/sh\nexit 0\n",
+            "preview/example.html": "must not enter build tree",
+        }
+        with tarfile.open(path, "w:gz") as tar:
+            for name, text in files.items():
+                data = text.encode()
+                member = tarfile.TarInfo("luci-theme-aeris/" + name)
+                member.mode = 0o755 if name.startswith("root/etc/uci-defaults/") else 0o644
+                member.size = len(data)
+                tar.addfile(member, io.BytesIO(data))
+            if extra:
+                tar.addfile(extra)
         return path
 
     def tailcat(self, machine=183, program_type=1, name="tailcat", link=False):
@@ -91,6 +117,23 @@ class SourceTests(unittest.TestCase):
         digest = utils.extract_core(self.core(), self.root / "clash")
         self.assertEqual(digest, utils.sha256(self.root / "clash"))
 
+    def test_github_auth_is_scoped_to_api_and_not_in_process_arguments(self):
+        calls = []
+        token = "ghs_test_only_placeholder"
+        def fake_curl(args, **kwargs):
+            self.assertFalse(any(token in arg for arg in args))
+            uses_auth = "--config" in args
+            if uses_auth:
+                config = Path(args[args.index("--config") + 1])
+                self.assertIn(token, config.read_text())
+                self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            calls.append(uses_auth)
+            Path(args[args.index("--output") + 1]).write_bytes(b"download")
+        with patch.dict(os.environ, {"GITHUB_TOKEN": token}), patch.object(utils.subprocess, "run", side_effect=fake_curl):
+            utils.fetch("https://api.github.com/repos/example/repo/releases/latest", self.root / "api")
+            utils.fetch("https://github.com/example/repo/releases/download/v1/source.tar.gz", self.root / "asset")
+        self.assertEqual(calls, [True, False])
+
     def test_dashboard_rejects_paths_and_links(self):
         link = zipfile.ZipInfo("dist/link")
         link.create_system = 3
@@ -107,7 +150,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(set(hashes), {"index.html", "assets/main.js"})
 
     def test_release_and_core_snapshot_is_consistent(self):
-        core, dashboard, tailcat = self.core(), self.dashboard(), self.tailcat()
+        core, dashboard, tailcat, aeris = self.core(), self.dashboard(), self.tailcat(), self.aeris()
         original = {
             "lede": {"url": "https://example.com/lede.git", "ref": "HEAD"},
             "feeds": {}, "openclash": {"url": "https://example.com/openclash.git", "ref": "HEAD"},
@@ -121,6 +164,10 @@ class SourceTests(unittest.TestCase):
             "name": "tailcat_0.7.0_linux_arm64.tar.gz", "digest": "sha256:" + utils.sha256(tailcat),
             "browser_download_url": "https://github.com/tailscale/tailcat/releases/download/v0.7.0/tailcat_0.7.0_linux_arm64.tar.gz",
         }]}
+        aeris_release = {"tag_name": "v1.0.2", "draft": False, "prerelease": False, "assets": [{
+            "name": "luci-theme-aeris-source.tar.gz", "digest": "sha256:" + utils.sha256(aeris),
+            "browser_download_url": "https://github.com/wizcheu/luci-theme-aeris/releases/download/v1.0.2/luci-theme-aeris-source.tar.gz",
+        }]}
         def text(url):
             if url.endswith("Makefile"):
                 return "PKG_VERSION:=0.48.002\n"
@@ -128,10 +175,13 @@ class SourceTests(unittest.TestCase):
                 return "alpha-g1234567\nalpha-smart-g7654321\n"
             if url.endswith("checksums.txt"):
                 return utils.sha256(core) + "  ./clash-linux-arm64.tar.gz\n"
+            if "wizcheu/luci-theme-aeris" in url:
+                return json.dumps(aeris_release)
             return json.dumps(tailcat_release if "tailscale/tailcat" in url else release)
         # Exercise real hash verification and archive validation with controlled upstream inputs.
         def download(url, dest, expected=None):
-            src = tailcat if "tailscale/tailcat" in url else core if url.endswith(".tar.gz") else dashboard
+            src = (aeris if "wizcheu/luci-theme-aeris" in url else
+                   tailcat if "tailscale/tailcat" in url else core if url.endswith(".tar.gz") else dashboard)
             if utils.sha256(src) != expected:
                 raise ValueError("SHA256 mismatch")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -143,9 +193,10 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(result["openclash_core"]["version"], "alpha-g1234567")
             self.assertEqual(result["zashboard"]["version"], "1.2.3")
             self.assertEqual(result["tailcat"]["version"], "0.7.0")
-            self.assertEqual(result["schema_version"], 3)
+            self.assertEqual(result["aeris"]["version"], "1.0.2")
+            self.assertEqual(result["schema_version"], 4)
             self.assertNotIn("commit", original["lede"])
-            for upstream in (release, tailcat_release):
+            for upstream in (release, tailcat_release, aeris_release):
                 digest = upstream["assets"][0]["digest"]
                 upstream["assets"][0]["digest"] = None
                 with self.assertRaisesRegex(ValueError, "SHA256 digest unavailable"):
@@ -162,16 +213,121 @@ class SourceTests(unittest.TestCase):
                 update_sources.main()
         self.assertEqual(path.read_bytes(), before)
 
+    def test_aeris_rejects_unsafe_archive_and_version_mismatch(self):
+        link = tarfile.TarInfo("luci-theme-aeris/root/link")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+        for extra in (tarfile.TarInfo("luci-theme-aeris/../../escape"), link):
+            with self.subTest(name=extra.name), self.assertRaisesRegex(ValueError, "Unsafe Aeris"):
+                utils.extract_aeris(self.aeris(extra=extra), self.root / "rejected", "1.0.2")
+        with self.assertRaisesRegex(ValueError, "version/name"):
+            utils.extract_aeris(self.aeris(), self.root / "rejected", "9.9.9")
+        self.assertFalse((self.root / "rejected").exists())
+        dest = self.root / "theme"
+        hashes = utils.extract_aeris(self.aeris(), dest, "1.0.2")
+        self.assertIn("www/luci-static/aeris/aeris.css", hashes)
+        self.assertEqual((dest / "root/etc/uci-defaults/30_luci-theme-aeris").stat().st_mode & 0o777, 0o755)
+        self.assertFalse((dest / "preview").exists())
+
+    def test_every_aeris_refresh_replaces_only_theme_inputs(self):
+        lede = self.root / "work/lede"
+        metadata = lede / "files/etc/ax6000-build.json"
+        utils.write_json(metadata, {"tailcat": {"version": "kept"}, "aeris": {"version": "old"}})
+        lock = {"schema_version": 4, "aeris": {"version": "old"}, "lede": {"commit": "b" * 40}}
+        utils.write_json(self.root / "sources.lock.json", lock)
+        releases = []
+        for version in ("1.0.2", "1.0.3"):
+            archive = self.aeris(version)
+            digest = utils.sha256(archive)
+            cache = self.root / "downloads"
+            cache.mkdir(exist_ok=True)
+            shutil.copyfile(archive, cache / (digest + ".tar.gz"))
+            releases.append({"version": version, "tag": "v" + version, "sha256": digest})
+        with patch.multiple(prepare, ROOT=self.root, LEDE=lede, LOCK=lock), \
+                patch.object(prepare, "resolve_aeris", side_effect=releases) as resolve, \
+                patch("sys.stdout", new=io.StringIO()):
+            for source in releases:
+                prepare.refresh_aeris()
+                actual = json.loads(metadata.read_text())
+                self.assertEqual(actual["aeris"]["version"], source["version"])
+                self.assertEqual(actual["tailcat"], {"version": "kept"})
+                self.assertEqual(json.loads((self.root / "sources.lock.json").read_text())["lede"], lock["lede"])
+                self.assertEqual(utils.package_version((lede / "package/custom/luci-theme-aeris/Makefile").read_text()), source["version"])
+            self.assertEqual(resolve.call_count, 2)
+        before = metadata.read_bytes(), (self.root / "sources.lock.json").read_bytes()
+        with patch.multiple(prepare, ROOT=self.root, LEDE=lede, LOCK=lock), \
+                patch.object(prepare, "resolve_aeris", side_effect=ValueError("release unavailable")):
+            with self.assertRaisesRegex(ValueError, "release unavailable"):
+                prepare.refresh_aeris()
+        self.assertEqual(before, (metadata.read_bytes(), (self.root / "sources.lock.json").read_bytes()))
+
+    def test_old_themes_and_argon_settings_are_rejected(self):
+        validate.validate_themes({"luci-theme-aeris", "luci-base"})
+        for extra in ("luci-theme-bootstrap", "luci-theme-argon", "luci-app-argon-config"):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                validate.validate_themes({"luci-theme-aeris", extra})
+        with self.assertRaises(SystemExit):
+            validate.validate_themes({"luci-base"})
+
+    def test_compile_stops_before_make_if_latest_theme_cannot_be_resolved(self):
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copyfile(prepare.ROOT / "scripts/build.sh", scripts / "build.sh")
+        (self.root / "work/lede").mkdir(parents=True)
+        bins = self.root / "bin"
+        bins.mkdir()
+        (bins / "python3").write_text('#!/bin/sh\nexit 17\n')
+        (bins / "make").write_text('#!/bin/sh\ntouch "$MAKE_MARKER"\n')
+        for path in bins.iterdir():
+            path.chmod(0o755)
+        marker = self.root / "make-was-called"
+        result = subprocess.run(["bash", str(scripts / "build.sh")],
+                                env=dict(os.environ, PATH=str(bins) + os.pathsep + os.environ["PATH"],
+                                         MAKE_MARKER=str(marker)), capture_output=True)
+        self.assertEqual(result.returncode, 17)
+        self.assertFalse(marker.exists())
+
+    def test_defaults_select_aeris_and_remove_stale_theme_entries(self):
+        bins = self.root / "bin"
+        bins.mkdir()
+        uci = bins / "uci"
+        uci.write_text(f"#!{sys.executable}\n" + '''import json, os, sys
+from pathlib import Path
+p = Path(os.environ['UCI_STATE'])
+state = json.loads(p.read_text())
+args = [a for a in sys.argv[1:] if a != '-q']
+if args[0] == 'get':
+    if args[1] not in state: sys.exit(1)
+    print(state[args[1]])
+elif args[0] == 'set':
+    key, value = args[1].split('=', 1); state[key] = value
+elif args[0] == 'delete':
+    state.pop(args[1], None)
+p.write_text(json.dumps(state))
+''')
+        uci.chmod(0o755)
+        state = self.root / "uci.json"
+        initial = {"luci.main.mediaurlbase": "/luci-static/argon", "unrelated.setting": "keep"}
+        initial.update({"luci.themes." + name: name for name in ("Bootstrap", "BootstrapDark", "BootstrapLight", "Argon")})
+        utils.write_json(state, initial)
+        env = dict(os.environ, PATH=str(bins) + os.pathsep + os.environ["PATH"], UCI_STATE=str(state))
+        for _ in range(2):
+            subprocess.run(["sh", str(prepare.ROOT / "files/etc/uci-defaults/99-ax6000-build")],
+                           env=env, capture_output=True, check=True)
+        actual = json.loads(state.read_text())
+        self.assertEqual(actual["luci.main.mediaurlbase"], "/luci-static/aeris")
+        self.assertEqual({k for k in actual if k.startswith("luci.themes.")}, {"luci.themes.Aeris"})
+        self.assertEqual(actual["unrelated.setting"], "keep")
+
     def test_prepare_keeps_tailcat_and_system_defaults_in_shared_directory(self):
         lock = json.loads(json.dumps(prepare.LOCK))
-        core, dashboard, tailcat = self.core(), self.dashboard(), self.tailcat()
+        core, dashboard, tailcat, aeris = self.core(), self.dashboard(), self.tailcat(), self.aeris()
         lock["openclash_core"]["binary_sha256"] = utils.extract_core(core, self.root / "core.bin")
         lock["tailcat"]["binary_sha256"] = utils.extract_tailcat(tailcat, self.root / "tailcat.bin")
         cache = self.root / "downloads"
         cache.mkdir()
         for component, archive, suffix in (("openclash_core", core, ".tar.gz"),
                                             ("zashboard", dashboard, ".zip"),
-                                            ("tailcat", tailcat, ".tar.gz")):
+                                            ("tailcat", tailcat, ".tar.gz"), ("aeris", aeris, ".tar.gz")):
             digest = lock[component]["sha256"] = utils.sha256(archive)
             shutil.copyfile(archive, cache / (digest + suffix))
         shutil.copytree(prepare.ROOT / "files", self.root / "files")
@@ -198,6 +354,9 @@ class SourceTests(unittest.TestCase):
         system_defaults = defaults / "99-ax6000-build"
         self.assertIn("uci -q set openclash.config.enable='0'", system_defaults.read_text())
         self.assertEqual(system_defaults.stat().st_mode & 0o777, 0o755)
+        self.assertIn("luci.main.mediaurlbase='/luci-static/aeris'", system_defaults.read_text())
+        self.assertTrue((lede / "package/custom/luci-theme-aeris/Makefile").is_file())
+        self.assertFalse((lede / "package/custom/luci-theme-aeris/preview").exists())
         self.assertEqual((lede / ".config").read_bytes(),
                          (self.root / "configs/ax6000.config").read_bytes())
         run.assert_called_with("python3", str(self.root / "scripts/validate.py"), "config", cwd=lede)

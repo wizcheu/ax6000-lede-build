@@ -10,12 +10,18 @@ import sys
 import tarfile
 import tempfile
 
-from source_utils import write_json
+from source_utils import sha256, write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDE = ROOT / "work/lede"
 BOARD = "xiaomi,redmi-router-ax6000"
 PROFILE = "xiaomi_redmi-router-ax6000"
+
+
+def validate_themes(packages):
+    themes = {name for name in packages if name.startswith("luci-theme-")}
+    if themes != {"luci-theme-aeris"} or "luci-app-argon-config" in packages:
+        raise SystemExit(f"Firmware must contain only Aeris and no Argon settings: {sorted(themes)}")
 
 
 def validate_config():
@@ -31,6 +37,8 @@ def validate_config():
     devices = [x for x in config if re.match(r"CONFIG_TARGET_mediatek_filogic_DEVICE_.+=y$", x)]
     if devices != [f"CONFIG_TARGET_mediatek_filogic_DEVICE_{PROFILE}=y"]:
         errors.append(f"Unexpected device selections: {devices}")
+    validate_themes({line.removeprefix("CONFIG_PACKAGE_").split("=")[0]
+                     for line in config if line.startswith("CONFIG_PACKAGE_") and line.endswith("=y")})
     dts = (LEDE / "target/linux/mediatek/dts/mt7986a-xiaomi-redmi-router-ax6000.dts").read_text()
     if not re.search(r"reg\s*=\s*<0x600000\s+0x6e00000>", dts):
         errors.append("Expected UBI offset/size absent from device tree")
@@ -46,11 +54,16 @@ def verify_bundled(image, packages):
     installed = packages["luci-app-openclash"]
     if installed != version and not installed.startswith(version + "-"):
         raise SystemExit(f"Unexpected compiled OpenClash version: {installed}")
+    aeris_version = bundled["aeris"]["version"]
+    if not packages["luci-theme-aeris"].startswith(aeris_version + "-"):
+        raise SystemExit(f"Unexpected compiled Aeris version: {packages['luci-theme-aeris']}")
     hashes = {"etc/openclash/core/clash_meta": bundled["mihomo"]["sha256"],
               "etc/ax6000-build.json": hashlib.sha256(expected_path.read_bytes()).hexdigest()}
     hashes.update({"usr/share/openclash/ui/zashboard/" + name: digest
                    for name, digest in bundled["zashboard"]["files"].items()})
     hashes.update(bundled["tailcat"]["files"])
+    hashes.update(bundled["aeris"]["files"])
+    hashes["etc/uci-defaults/99-ax6000-build"] = sha256(ROOT / "files/etc/uci-defaults/99-ax6000-build")
     with tempfile.TemporaryDirectory() as temp:
         rootfs = Path(temp) / "root.squashfs"
         with tarfile.open(image, "r:") as tar:
@@ -65,6 +78,16 @@ def verify_bundled(image, packages):
         if any(line.startswith("squashfs-root/" + name) for line in listing.splitlines()
                for name in forbidden):
             raise SystemExit("Generic firmware must contain no Tailcat identity or autostart links")
+        theme_paths = ("www/luci-static/bootstrap", "www/luci-static/argon",
+                       "usr/share/ucode/luci/template/themes/bootstrap", "usr/share/ucode/luci/template/themes/argon",
+                       "usr/lib/lua/luci/view/themes/bootstrap", "usr/lib/lua/luci/view/themes/argon")
+        if any(line.startswith("squashfs-root/" + name) for line in listing.splitlines()
+               for name in theme_paths):
+            raise SystemExit("Removed theme files remain inside firmware")
+        for name in ("header.ut", "footer.ut", "sysauth.ut"):
+            template = "squashfs-root/usr/share/ucode/luci/template/themes/aeris/" + name
+            if template not in listing.splitlines():
+                raise SystemExit(f"Aeris template missing inside firmware: {name}")
         for name, digest in hashes.items():
             data = subprocess.check_output([str(unsquashfs), "-cat", str(rootfs), name])
             if hashlib.sha256(data).hexdigest() != digest:
@@ -99,9 +122,10 @@ def validate_image():
     if len(manifest_files) != 1:
         raise SystemExit("Expected one package manifest")
     packages = dict(line.split(" - ", 1) for line in manifest_files[0].read_text().splitlines())
-    required = {"luci-app-openclash", "ruby-yaml", "firewall4", "kmod-mt7915e", "dnsmasq-full"}
+    required = {"luci-theme-aeris", "luci-app-openclash", "ruby-yaml", "firewall4", "kmod-mt7915e", "dnsmasq-full"}
     if not required <= packages.keys():
         raise SystemExit(f"Packages missing from image: {required - packages.keys()}")
+    validate_themes(packages)
     bundled = verify_bundled(image, packages)
     write_json(dest / "software-versions.json", {"bundled": bundled, "packages": dict(sorted(packages.items()))})
     for path in [image, *manifest_files, out / "profiles.json"]:
@@ -116,7 +140,7 @@ def validate_image():
     result = {"image": image.name, "size_bytes": size, "sha256": sha,
               "supported_devices": meta["supported_devices"], "package_count": len(packages),
               "bundled_versions": {name: bundled[name]["version"]
-                                   for name in ("openclash", "mihomo", "zashboard", "tailcat")},
+                                   for name in ("aeris", "openclash", "mihomo", "zashboard", "tailcat")},
               "bundled_files_verified_in_image": True,
               "runtime_tested": False, "flashed": False}
     (dest / "validation.json").write_text(json.dumps(result, indent=2) + "\n")

@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+import tempfile
 
-from source_utils import (extract_core, extract_dashboard, extract_tailcat, locked_download,
+from source_utils import (extract_aeris, extract_core, extract_dashboard, extract_tailcat, locked_download,
                           package_version, sha256, write_json)
+from update_sources import resolve_aeris
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work"
@@ -65,6 +68,7 @@ def install_bundled(lock, lede, cache):
     tailcat_files += ["usr/bin/tailcat", "usr/share/licenses/tailcat/LICENSE"]
     bundled = {
         "resolved_at": lock["resolved_at"],
+        "aeris": install_aeris(lock["aeris"], lede, cache),
         "openclash": {"version": actual_version, "commit": lock["openclash"]["commit"]},
         "mihomo": {"version": core["version"], "channel": core["channel"], "sha256": core_sha},
         "zashboard": {"version": dashboard["version"], "tag": dashboard["tag"],
@@ -77,8 +81,33 @@ def install_bundled(lock, lede, cache):
     return bundled
 
 
+def install_aeris(source, lede, cache):
+    package = lede / "package/custom/luci-theme-aeris"
+    archive = locked_download(source, cache, ".tar.gz")
+    with tempfile.TemporaryDirectory() as temp:
+        staged = Path(temp) / "aeris"
+        hashes = extract_aeris(archive, staged, source["version"])
+        if package.exists():
+            shutil.rmtree(package)
+        shutil.copytree(staged, package)
+    return {"version": source["version"], "tag": source["tag"],
+            "archive_sha256": source["sha256"], "files": hashes}
+
+
+def refresh_aeris():
+    """Every compilation, including a reused build tree, resolves Aeris anew."""
+    metadata = LEDE / "files/etc/ax6000-build.json"
+    bundled = json.loads(metadata.read_text())
+    source = resolve_aeris(ROOT / "downloads")
+    bundled["aeris"] = install_aeris(source, LEDE, ROOT / "downloads")
+    lock = dict(LOCK, aeris=source, schema_version=4)
+    write_json(metadata, bundled)
+    write_json(ROOT / "sources.lock.json", lock)
+    print(f"Aeris selected for this compilation: {source['tag']} ({source['sha256']})")
+
+
 def main():
-    if LOCK.get("schema_version") != 3:
+    if LOCK.get("schema_version") != 4:
         raise SystemExit("Run update_sources.py to migrate this old lock before preparing sources")
     WORK.mkdir(exist_ok=True)
     checkout(LOCK["lede"], LEDE)
@@ -93,23 +122,11 @@ def main():
 
     bundled = install_bundled(LOCK, LEDE, ROOT / "downloads")
     print("Bundled versions:", {name: bundled[name]["version"]
-                               for name in ("openclash", "mihomo", "zashboard", "tailcat")})
+                               for name in ("aeris", "openclash", "mihomo", "zashboard", "tailcat")})
 
     defaults = LEDE / "files/etc/uci-defaults/99-ax6000-build"
     defaults.parent.mkdir(parents=True, exist_ok=True)
-    defaults.write_text("""#!/bin/sh
-uci -q set system.@system[0].timezone='CST-8'
-uci -q set system.@system[0].zonename='Asia/Shanghai'
-uci -q set luci.main.lang='zh_cn'
-uci -q set luci.main.mediaurlbase='/luci-static/argon'
-uci -q set openclash.config.core_version='linux-arm64'
-uci -q set openclash.config.core_type='Meta'
-uci -q set openclash.config.enable='0'
-uci -q commit system
-uci -q commit luci
-uci -q commit openclash
-exit 0
-""")
+    shutil.copyfile(ROOT / "files/etc/uci-defaults/99-ax6000-build", defaults)
     defaults.chmod(0o755)
     run("./scripts/feeds", "update", "-a", cwd=LEDE)
     run("./scripts/feeds", "install", "-a", cwd=LEDE)
@@ -120,4 +137,9 @@ exit 0
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--refresh-aeris"]:
+        refresh_aeris()
+    elif not sys.argv[1:]:
+        main()
+    else:
+        raise SystemExit("Usage: prepare.py [--refresh-aeris]")

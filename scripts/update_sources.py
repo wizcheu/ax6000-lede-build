@@ -7,7 +7,7 @@ import re
 import subprocess
 import tempfile
 
-from source_utils import (extract_core, extract_dashboard, extract_tailcat, fetch_text, locked_download,
+from source_utils import (extract_aeris, extract_core, extract_dashboard, extract_tailcat, fetch_text, locked_download,
                           package_version, write_json)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +46,13 @@ def latest(url, ref):
     return sha
 
 
+def resolve_aeris(cache):
+    source = stable_release("wizcheu/luci-theme-aeris", "luci-theme-aeris-source.tar.gz")
+    with tempfile.TemporaryDirectory() as temp:
+        extract_aeris(locked_download(source, cache, ".tar.gz"), Path(temp) / "aeris", source["version"])
+    return source
+
+
 def resolve(lock, cache):
     # A detached copy ensures a failed update cannot partially change the caller's lock.
     lock = json.loads(json.dumps(lock))
@@ -82,7 +89,8 @@ def resolve(lock, cache):
         extract_dashboard(locked_download(dashboard, cache, ".zip"), Path(temp) / "zashboard")
         tailcat["binary_sha256"] = extract_tailcat(
             locked_download(tailcat, cache, ".tar.gz"), Path(temp) / "tailcat")
-    lock["schema_version"] = 3
+    lock["aeris"] = resolve_aeris(cache)
+    lock["schema_version"] = 4
     lock["resolved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return lock
 
