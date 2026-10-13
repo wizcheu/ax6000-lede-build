@@ -2,14 +2,12 @@
 uci -q set system.@system[0].timezone='CST-8'
 uci -q set system.@system[0].zonename='Asia/Shanghai'
 uci -q set luci.main.lang='zh_cn'
-uci -q get luci.themes >/dev/null || uci set luci.themes=internal
+# Rebuild the choices so saved configurations cannot advertise absent themes.
+uci -q delete luci.themes
+uci -q set luci.themes=internal
+uci -q set luci.themes.Mono='/luci-static/mono'
 uci -q set luci.themes.Aeris='/luci-static/aeris'
-uci -q set luci.main.mediaurlbase='/luci-static/aeris'
-# Clear stale theme choices when upgrading from older builds with saved config.
-uci -q delete luci.themes.Bootstrap
-uci -q delete luci.themes.BootstrapDark
-uci -q delete luci.themes.BootstrapLight
-uci -q delete luci.themes.Argon
+uci -q set luci.main.mediaurlbase='/luci-static/mono'
 uci -q set openclash.config.core_version='linux-arm64'
 uci -q set openclash.config.core_type='Meta'
 uci -q set openclash.config.enable='0'

@@ -12,6 +12,8 @@ import tempfile
 import zipfile
 from urllib.parse import urlsplit
 
+THEMES = ("mono", "aeris")
+
 
 def sha256(path):
     with Path(path).open("rb") as stream:
@@ -82,14 +84,16 @@ def package_version(makefile):
     return match[1]
 
 
-def extract_aeris(archive, dest, version):
+def extract_theme(archive, dest, theme, version):
     """Validate the release source archive before copying its package inputs."""
+    if theme not in THEMES:
+        raise ValueError(f"Unsupported firmware theme: {theme}")
     dest = Path(dest)
-    prefix = "luci-theme-aeris"
+    prefix = f"luci-theme-{theme}"
     with tarfile.open(archive, "r:gz") as tar:
         members = tar.getmembers()
         if len(members) > 2000 or sum(m.size for m in members) > 25 * 1024**2:
-            raise ValueError("Aeris source archive is unexpectedly large")
+            raise ValueError(f"{theme} source archive is unexpectedly large")
         seen = set()
         files = {}
         for member in members:
@@ -97,20 +101,20 @@ def extract_aeris(archive, dest, version):
             if (parts[0] != prefix or any(p in ("", ".", "..") for p in parts) or
                     "\\" in member.name or member.name in seen or
                     not (member.isfile() or member.isdir())):
-                raise ValueError(f"Unsafe Aeris archive entry: {member.name}")
+                raise ValueError(f"Unsafe {theme} archive entry: {member.name}")
             seen.add(member.name)
             if member.isfile():
                 files["/".join(parts[1:])] = member
-        required = {"Makefile", "LICENSE", "NOTICE", "htdocs/luci-static/aeris/aeris.css",
-                    "ucode/template/themes/aeris/header.ut", "ucode/template/themes/aeris/footer.ut",
-                    "ucode/template/themes/aeris/sysauth.ut",
-                    "root/etc/uci-defaults/30_luci-theme-aeris"}
+        required = {"Makefile", "LICENSE", "NOTICE", f"htdocs/luci-static/{theme}/{theme}.css",
+                    f"ucode/template/themes/{theme}/header.ut", f"ucode/template/themes/{theme}/footer.ut",
+                    f"ucode/template/themes/{theme}/sysauth.ut",
+                    f"root/etc/uci-defaults/30_luci-theme-{theme}"}
         if not required <= files.keys():
-            raise ValueError(f"Aeris package inputs missing: {required - files.keys()}")
+            raise ValueError(f"{theme} package inputs missing: {required - files.keys()}")
         makefile = tar.extractfile(files["Makefile"]).read().decode()
         if (package_version(makefile) != version or
-                not re.search(r"^PKG_NAME:=luci-theme-aeris$", makefile, re.M)):
-            raise ValueError("Aeris source version/name does not match release")
+                not re.search(rf"^PKG_NAME:={prefix}$", makefile, re.M)):
+            raise ValueError(f"{theme} source version/name does not match release")
         # Preview pages, tests and repository metadata are not build inputs.
         for name, member in files.items():
             if name not in {"Makefile", "LICENSE", "NOTICE"} and not name.startswith(("htdocs/", "ucode/", "root/")):

@@ -10,7 +10,7 @@ import sys
 import tarfile
 import tempfile
 
-from source_utils import sha256, write_json
+from source_utils import THEMES, sha256, write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 LEDE = ROOT / "work/lede"
@@ -20,8 +20,8 @@ PROFILE = "xiaomi_redmi-router-ax6000"
 
 def validate_themes(packages):
     themes = {name for name in packages if name.startswith("luci-theme-")}
-    if themes != {"luci-theme-aeris"} or "luci-app-argon-config" in packages:
-        raise SystemExit(f"Firmware must contain only Aeris and no Argon settings: {sorted(themes)}")
+    if themes != {f"luci-theme-{theme}" for theme in THEMES} or "luci-app-argon-config" in packages:
+        raise SystemExit(f"Firmware must contain only Mono and Aeris and no Argon settings: {sorted(themes)}")
 
 
 def validate_config():
@@ -54,15 +54,17 @@ def verify_bundled(image, packages):
     installed = packages["luci-app-openclash"]
     if installed != version and not installed.startswith(version + "-"):
         raise SystemExit(f"Unexpected compiled OpenClash version: {installed}")
-    aeris_version = bundled["aeris"]["version"]
-    if not packages["luci-theme-aeris"].startswith(aeris_version + "-"):
-        raise SystemExit(f"Unexpected compiled Aeris version: {packages['luci-theme-aeris']}")
+    for theme in THEMES:
+        installed = packages[f"luci-theme-{theme}"]
+        if not installed.startswith(bundled[theme]["version"] + "-"):
+            raise SystemExit(f"Unexpected compiled {theme} version: {installed}")
     hashes = {"etc/openclash/core/clash_meta": bundled["mihomo"]["sha256"],
               "etc/ax6000-build.json": hashlib.sha256(expected_path.read_bytes()).hexdigest()}
     hashes.update({"usr/share/openclash/ui/zashboard/" + name: digest
                    for name, digest in bundled["zashboard"]["files"].items()})
     hashes.update(bundled["tailcat"]["files"])
-    hashes.update(bundled["aeris"]["files"])
+    for theme in THEMES:
+        hashes.update(bundled[theme]["files"])
     hashes["etc/uci-defaults/99-ax6000-build"] = sha256(ROOT / "files/etc/uci-defaults/99-ax6000-build")
     with tempfile.TemporaryDirectory() as temp:
         rootfs = Path(temp) / "root.squashfs"
@@ -84,10 +86,11 @@ def verify_bundled(image, packages):
         if any(line.startswith("squashfs-root/" + name) for line in listing.splitlines()
                for name in theme_paths):
             raise SystemExit("Removed theme files remain inside firmware")
-        for name in ("header.ut", "footer.ut", "sysauth.ut"):
-            template = "squashfs-root/usr/share/ucode/luci/template/themes/aeris/" + name
-            if template not in listing.splitlines():
-                raise SystemExit(f"Aeris template missing inside firmware: {name}")
+        for theme in THEMES:
+            for name in ("header.ut", "footer.ut", "sysauth.ut"):
+                template = f"squashfs-root/usr/share/ucode/luci/template/themes/{theme}/" + name
+                if template not in listing.splitlines():
+                    raise SystemExit(f"{theme} template missing inside firmware: {name}")
         for name, digest in hashes.items():
             data = subprocess.check_output([str(unsquashfs), "-cat", str(rootfs), name])
             if hashlib.sha256(data).hexdigest() != digest:
@@ -122,7 +125,7 @@ def validate_image():
     if len(manifest_files) != 1:
         raise SystemExit("Expected one package manifest")
     packages = dict(line.split(" - ", 1) for line in manifest_files[0].read_text().splitlines())
-    required = {"luci-theme-aeris", "luci-app-openclash", "ruby-yaml", "firewall4", "kmod-mt7915e", "dnsmasq-full"}
+    required = {"luci-theme-mono", "luci-theme-aeris", "luci-app-openclash", "ruby-yaml", "firewall4", "kmod-mt7915e", "dnsmasq-full"}
     if not required <= packages.keys():
         raise SystemExit(f"Packages missing from image: {required - packages.keys()}")
     validate_themes(packages)
@@ -140,7 +143,7 @@ def validate_image():
     result = {"image": image.name, "size_bytes": size, "sha256": sha,
               "supported_devices": meta["supported_devices"], "package_count": len(packages),
               "bundled_versions": {name: bundled[name]["version"]
-                                   for name in ("aeris", "openclash", "mihomo", "zashboard", "tailcat")},
+                                   for name in (*THEMES, "openclash", "mihomo", "zashboard", "tailcat")},
               "bundled_files_verified_in_image": True,
               "runtime_tested": False, "flashed": False}
     (dest / "validation.json").write_text(json.dumps(result, indent=2) + "\n")

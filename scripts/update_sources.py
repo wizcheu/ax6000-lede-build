@@ -7,7 +7,7 @@ import re
 import subprocess
 import tempfile
 
-from source_utils import (extract_aeris, extract_core, extract_dashboard, extract_tailcat, fetch_text, locked_download,
+from source_utils import (THEMES, extract_theme, extract_core, extract_dashboard, extract_tailcat, fetch_text, locked_download,
                           package_version, write_json)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,11 +46,14 @@ def latest(url, ref):
     return sha
 
 
-def resolve_aeris(cache):
-    source = stable_release("wizcheu/luci-theme-aeris", "luci-theme-aeris-source.tar.gz")
+def resolve_themes(cache):
+    sources = {}
     with tempfile.TemporaryDirectory() as temp:
-        extract_aeris(locked_download(source, cache, ".tar.gz"), Path(temp) / "aeris", source["version"])
-    return source
+        for theme in THEMES:
+            source = stable_release(f"wizcheu/luci-theme-{theme}", f"luci-theme-{theme}-source.tar.gz")
+            extract_theme(locked_download(source, cache, ".tar.gz"), Path(temp) / theme, theme, source["version"])
+            sources[theme] = source
+    return sources
 
 
 def resolve(lock, cache):
@@ -89,8 +92,8 @@ def resolve(lock, cache):
         extract_dashboard(locked_download(dashboard, cache, ".zip"), Path(temp) / "zashboard")
         tailcat["binary_sha256"] = extract_tailcat(
             locked_download(tailcat, cache, ".tar.gz"), Path(temp) / "tailcat")
-    lock["aeris"] = resolve_aeris(cache)
-    lock["schema_version"] = 4
+    lock.update(resolve_themes(cache))
+    lock["schema_version"] = 5
     lock["resolved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return lock
 

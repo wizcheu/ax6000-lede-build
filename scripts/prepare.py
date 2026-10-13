@@ -7,9 +7,9 @@ import subprocess
 import sys
 import tempfile
 
-from source_utils import (extract_aeris, extract_core, extract_dashboard, extract_tailcat, locked_download,
+from source_utils import (THEMES, extract_theme, extract_core, extract_dashboard, extract_tailcat, locked_download,
                           package_version, sha256, write_json)
-from update_sources import resolve_aeris
+from update_sources import resolve_themes
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "work"
@@ -68,7 +68,7 @@ def install_bundled(lock, lede, cache):
     tailcat_files += ["usr/bin/tailcat", "usr/share/licenses/tailcat/LICENSE"]
     bundled = {
         "resolved_at": lock["resolved_at"],
-        "aeris": install_aeris(lock["aeris"], lede, cache),
+        **install_themes(lock, lede, cache),
         "openclash": {"version": actual_version, "commit": lock["openclash"]["commit"]},
         "mihomo": {"version": core["version"], "channel": core["channel"], "sha256": core_sha},
         "zashboard": {"version": dashboard["version"], "tag": dashboard["tag"],
@@ -81,33 +81,80 @@ def install_bundled(lock, lede, cache):
     return bundled
 
 
-def install_aeris(source, lede, cache):
-    package = lede / "package/custom/luci-theme-aeris"
-    archive = locked_download(source, cache, ".tar.gz")
+def install_themes(sources, lede, cache):
+    """Validate both themes before replacing any previously prepared package."""
+    bundled = {}
     with tempfile.TemporaryDirectory() as temp:
-        staged = Path(temp) / "aeris"
-        hashes = extract_aeris(archive, staged, source["version"])
-        if package.exists():
-            shutil.rmtree(package)
-        shutil.copytree(staged, package)
-    return {"version": source["version"], "tag": source["tag"],
-            "archive_sha256": source["sha256"], "files": hashes}
+        for theme in THEMES:
+            source = sources[theme]
+            staged = Path(temp) / theme
+            hashes = extract_theme(locked_download(source, cache, ".tar.gz"), staged, theme, source["version"])
+            # LEDE scans for a literal BuildPackage signature. Keep runtime assets
+            # unchanged so modern CSS and the final image's file hashes survive.
+            makefile = staged / "Makefile"
+            include = "include $(TOPDIR)/feeds/luci/luci.mk"
+            text = makefile.read_text()
+            if text.count(include) != 1:
+                raise ValueError(f"Unexpected {theme} LuCI build include")
+            settings = (f"LUCI_NAME:=luci-theme-{theme}\n"
+                        "LUCI_MINIFY_JS:=0\nLUCI_MINIFY_CSS:=0\n"
+                        "# call BuildPackage - OpenWrt buildroot scan signature\n")
+            makefile.write_text(text.replace(include, settings + include))
+            license_dir = staged / f"root/usr/share/luci-theme-{theme}"
+            license_dir.mkdir(parents=True, exist_ok=True)
+            for name in ("LICENSE", "NOTICE"):
+                shutil.copyfile(staged / name, license_dir / name)
+                hashes[f"usr/share/luci-theme-{theme}/{name}"] = sha256(license_dir / name)
+            bundled[theme] = {"version": source["version"], "tag": source["tag"],
+                              "archive_sha256": source["sha256"], "files": hashes}
+        for theme in THEMES:
+            package = lede / f"package/custom/luci-theme-{theme}"
+            if package.exists():
+                shutil.rmtree(package)
+            shutil.copytree(Path(temp) / theme, package)
+    return bundled
 
 
-def refresh_aeris():
-    """Every compilation, including a reused build tree, resolves Aeris anew."""
+def configure_themes(lede):
+    """Apply the theme policy to existing build trees as well as fresh ones."""
+    config = lede / ".config"
+    lines = config.read_text().splitlines()
+    excluded = {"luci", "luci-light", "luci-app-argon-config", "luci-theme-bootstrap", "luci-theme-argon"}
+    selected = {f"luci-theme-{theme}" for theme in THEMES}
+    kept = []
+    for line in lines:
+        option = line.removeprefix("# ").split("=", 1)[0].split(" ", 1)[0]
+        package = option.removeprefix("CONFIG_PACKAGE_")
+        if package.startswith("luci-theme-") or package in excluded:
+            if package not in selected:
+                excluded.add(package)
+        else:
+            kept.append(line)
+    kept.extend(f"CONFIG_PACKAGE_{name}=y" for name in sorted(selected))
+    kept.extend(f"# CONFIG_PACKAGE_{name} is not set" for name in sorted(excluded))
+    config.write_text("\n".join(kept) + "\n")
+    defaults = lede / "files/etc/uci-defaults/99-ax6000-build"
+    defaults.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / "files/etc/uci-defaults/99-ax6000-build", defaults)
+    defaults.chmod(0o755)
+
+
+def refresh_themes():
+    """Every compilation, including a reused build tree, resolves both themes anew."""
     metadata = LEDE / "files/etc/ax6000-build.json"
     bundled = json.loads(metadata.read_text())
-    source = resolve_aeris(ROOT / "downloads")
-    bundled["aeris"] = install_aeris(source, LEDE, ROOT / "downloads")
-    lock = dict(LOCK, aeris=source, schema_version=4)
+    sources = resolve_themes(ROOT / "downloads")
+    bundled.update(install_themes(sources, LEDE, ROOT / "downloads"))
+    configure_themes(LEDE)
+    lock = dict(LOCK, **sources, schema_version=5)
     write_json(metadata, bundled)
     write_json(ROOT / "sources.lock.json", lock)
-    print(f"Aeris selected for this compilation: {source['tag']} ({source['sha256']})")
+    for theme, source in sources.items():
+        print(f"{theme} selected for this compilation: {source['tag']} ({source['sha256']})")
 
 
 def main():
-    if LOCK.get("schema_version") != 4:
+    if LOCK.get("schema_version") != 5:
         raise SystemExit("Run update_sources.py to migrate this old lock before preparing sources")
     WORK.mkdir(exist_ok=True)
     checkout(LOCK["lede"], LEDE)
@@ -122,7 +169,7 @@ def main():
 
     bundled = install_bundled(LOCK, LEDE, ROOT / "downloads")
     print("Bundled versions:", {name: bundled[name]["version"]
-                               for name in ("aeris", "openclash", "mihomo", "zashboard", "tailcat")})
+                               for name in (*THEMES, "openclash", "mihomo", "zashboard", "tailcat")})
 
     defaults = LEDE / "files/etc/uci-defaults/99-ax6000-build"
     defaults.parent.mkdir(parents=True, exist_ok=True)
@@ -137,9 +184,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--refresh-aeris"]:
-        refresh_aeris()
+    if sys.argv[1:] == ["--refresh-themes"]:
+        refresh_themes()
     elif not sys.argv[1:]:
         main()
     else:
-        raise SystemExit("Usage: prepare.py [--refresh-aeris]")
+        raise SystemExit("Usage: prepare.py [--refresh-themes]")
